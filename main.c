@@ -9,7 +9,7 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 #define BRANCHES_COUNT_KEY "branches-count"
 #define BUFFERS_COUNT_KEY "buffers-count"
-#define N_BRANCHES 5
+#define N_BRANCHES 200
 #define NUM_BUFFERS 20
 
 static gint times = TIMES;
@@ -112,11 +112,42 @@ new_sample (GstElement * appsink, gpointer data)
   return GST_FLOW_OK;
 }
 
+static GstPadProbeReturn
+link_to_tee (GstPad * pad, GstPadProbeInfo * info, gpointer queue)
+{
+  GstElement *tee;
+
+  if (gst_pad_is_linked (pad)) {
+    return GST_PAD_PROBE_PASS;
+  }
+
+  GST_OBJECT_LOCK (pad);
+  if (g_object_get_data (G_OBJECT (pad), "linking")) {
+    GST_OBJECT_UNLOCK (pad);
+    return GST_PAD_PROBE_PASS;
+  }
+  g_object_set_data (G_OBJECT (pad), "linking", GINT_TO_POINTER (TRUE));
+  GST_OBJECT_UNLOCK (pad);
+
+  tee = gst_pad_get_parent_element (pad);
+
+  if (tee == NULL) {
+    return GST_PAD_PROBE_PASS;
+  }
+
+  gst_element_link_pads (tee, GST_OBJECT_NAME (pad), queue, NULL);
+
+  g_object_unref (tee);
+
+  return GST_PAD_PROBE_REMOVE;
+}
+
 static gboolean
 connect_branch (gpointer pipeline)
 {
   GstElement *tee = gst_bin_get_by_name (GST_BIN (pipeline), "tee");
   GstElement *queue, *sink;
+  GstPad *tee_src;
 
   if (tee == NULL) {
     g_atomic_int_set (&error, TRUE);
@@ -134,7 +165,10 @@ connect_branch (gpointer pipeline)
   gst_element_link (queue, sink);
   gst_element_sync_state_with_parent (queue);
   gst_element_sync_state_with_parent (sink);
-  gst_element_link (tee, queue);
+
+  tee_src = gst_element_get_request_pad (tee, "src_%u");
+  gst_pad_add_probe (tee_src, GST_PAD_PROBE_TYPE_BLOCKING, link_to_tee,
+      g_object_ref (queue), g_object_unref);
 
   g_object_unref (tee);
 
